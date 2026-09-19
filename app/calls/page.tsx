@@ -32,7 +32,7 @@ import {
 export default function CallsPage() {
   const router = useRouter();
   const { user, isDemoUser } = useAuth();
-  const { contacts, startCall } = useChat();
+  const { contacts, conversations, startCall } = useChat();
   const userId = user?.id || "guest";
 
   const [callLogs, setCallLogs] = React.useState<CallLog[]>([]);
@@ -43,11 +43,11 @@ export default function CallsPage() {
   // Hydration-safe initial state loading + live call updates listener
   React.useEffect(() => {
     setIsMounted(true);
-    if (typeof window !== "undefined") {
-      setCallLogs(getCallLogs(userId, isDemoUser));
+    setCallLogs(getCallLogs(userId));
 
+    if (typeof window !== "undefined") {
       const handleUpdate = () => {
-        setCallLogs(getCallLogs(userId, isDemoUser));
+        setCallLogs(getCallLogs(userId));
       };
 
       window.addEventListener("chatconnect_calls_updated", handleUpdate);
@@ -55,7 +55,7 @@ export default function CallsPage() {
         window.removeEventListener("chatconnect_calls_updated", handleUpdate);
       };
     }
-  }, [userId, isDemoUser]);
+  }, [userId]);
 
   const handleStartCall = (name: string, type: "video" | "audio", avatar?: string) => {
     const callId = `call-${Date.now()}`;
@@ -68,16 +68,29 @@ export default function CallsPage() {
       duration: "00m 00s",
     });
 
-    const matchedContact = contacts?.find(
+    // 1. Search in contacts
+    let targetUserId = contacts?.find(
       (c) =>
         c.full_name?.toLowerCase() === name.toLowerCase() ||
         (c.username && c.username.toLowerCase() === name.toLowerCase())
-    );
+    )?.id;
 
-    if (matchedContact && startCall) {
+    // 2. If not found in contacts, search in conversations
+    if (!targetUserId && conversations) {
+      const conv = conversations.find((c) => {
+        const other = c.other_user || c.members?.find((m) => m.user_id !== userId)?.profile;
+        const otherName = other?.full_name || other?.username || c.name || "";
+        return otherName.toLowerCase() === name.toLowerCase();
+      });
+      if (conv) {
+        targetUserId = conv.other_user?.id || conv.members?.find((m) => m.user_id !== userId)?.user_id;
+      }
+    }
+
+    if (targetUserId && startCall) {
       startCall(
         {
-          id: matchedContact.id,
+          id: targetUserId,
           name,
           avatar,
         },

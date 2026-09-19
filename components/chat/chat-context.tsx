@@ -505,6 +505,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           markAsRead(convId);
         }
       })
+      .on("broadcast", { event: "incoming_call" }, (payload) => {
+        const data = payload.payload;
+        if (!data || data.callerId === userId) return;
+
+        setIncomingCall((prev) => {
+          if (prev && prev.callId === data.callId) return prev;
+          return {
+            callId: data.callId,
+            roomId: data.roomId,
+            caller: {
+              id: data.callerId,
+              name: data.callerName,
+              avatar: data.callerAvatar,
+            },
+            callType: data.callType || "video",
+            conversationId: data.conversationId,
+          };
+        });
+      })
+      .on("broadcast", { event: "call_cancelled" }, () => {
+        setIncomingCall(null);
+      })
       .subscribe();
 
     return () => {
@@ -1085,6 +1107,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const targetChannel = supabase.channel(`user-calls:${targetUser.id}`, {
       config: { broadcast: { self: false } },
     });
+    const inboxTargetChannel = supabase.channel(`inbox-notifications:${targetUser.id}`, {
+      config: { broadcast: { self: false } },
+    });
     outgoingTargetChannelRef.current = targetChannel;
 
     const callPayload = {
@@ -1097,28 +1122,43 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       conversationId,
     };
 
-    targetChannel.subscribe((status) => {
-      if (status === "SUBSCRIBED") {
+    const sendCallPing = () => {
+      try {
         targetChannel.send({
           type: "broadcast",
           event: "incoming_call",
           payload: callPayload,
         });
+      } catch {}
+      try {
+        inboxTargetChannel.send({
+          type: "broadcast",
+          event: "incoming_call",
+          payload: callPayload,
+        });
+      } catch {}
+    };
+
+    targetChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendCallPing();
       }
     });
 
-    // Repeat ping every 2s for up to 30s while ringing to ensure guaranteed delivery
+    inboxTargetChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendCallPing();
+      }
+    });
+
+    // Repeat ping every 1.5s for up to 30s while ringing to ensure guaranteed delivery
     const pingInterval = setInterval(() => {
       if (outgoingCallRef.current && outgoingCallRef.current.callId === callId) {
-        targetChannel.send({
-          type: "broadcast",
-          event: "incoming_call",
-          payload: callPayload,
-        });
+        sendCallPing();
       } else {
         clearInterval(pingInterval);
       }
-    }, 2000);
+    }, 1500);
     outgoingPingIntervalRef.current = pingInterval;
 
     // Auto timeout after 35s if unanswered
@@ -1144,6 +1184,25 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           });
         } catch {}
       }
+      if (outgoingCall.callee?.id) {
+        try {
+          const chan = supabase.channel(`inbox-notifications:${outgoingCall.callee.id}`, {
+            config: { broadcast: { self: false } },
+          });
+          chan.subscribe((status) => {
+            if (status === "SUBSCRIBED") {
+              chan.send({
+                type: "broadcast",
+                event: "call_cancelled",
+                payload: { callId: outgoingCall.callId },
+              });
+              setTimeout(() => {
+                try { supabase.removeChannel(chan); } catch {}
+              }, 1000);
+            }
+          });
+        } catch {}
+      }
       cleanupOutgoingCall();
       setOutgoingCall(null);
     }
@@ -1153,28 +1212,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!incomingCall) return;
     const { callId, roomId, caller, callType } = incomingCall;
 
-    const existing = supabase.getChannels().find((c) => c.topic === `realtime:user-calls:${caller.id}`);
-    if (existing) {
-      try {
-        supabase.removeChannel(existing);
-      } catch {}
-    }
-
     const callerChannel = supabase.channel(`user-calls:${caller.id}`, {
       config: { broadcast: { self: false } },
     });
-    callerChannel.subscribe((status) => {
-      if (status === "SUBSCRIBED") {
-        callerChannel.send({
+    const callerInboxChannel = supabase.channel(`inbox-notifications:${caller.id}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    const sendAccepted = (ch: typeof callerChannel) => {
+      try {
+        ch.send({
           type: "broadcast",
           event: "call_accepted",
           payload: { callId, roomId },
         });
+      } catch {}
+    };
+
+    callerChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendAccepted(callerChannel);
         setTimeout(() => {
-          try {
-            supabase.removeChannel(callerChannel);
-          } catch {}
-        }, 1000);
+          try { supabase.removeChannel(callerChannel); } catch {}
+        }, 1200);
+      }
+    });
+
+    callerInboxChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendAccepted(callerInboxChannel);
+        setTimeout(() => {
+          try { supabase.removeChannel(callerInboxChannel); } catch {}
+        }, 1200);
       }
     });
 
@@ -1189,27 +1258,37 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!incomingCall) return;
     const { callId, caller } = incomingCall;
 
-    const existing = supabase.getChannels().find((c) => c.topic === `realtime:user-calls:${caller.id}`);
-    if (existing) {
-      try {
-        supabase.removeChannel(existing);
-      } catch {}
-    }
-
     const callerChannel = supabase.channel(`user-calls:${caller.id}`, {
       config: { broadcast: { self: false } },
     });
-    callerChannel.subscribe((status) => {
-      if (status === "SUBSCRIBED") {
-        callerChannel.send({
+    const callerInboxChannel = supabase.channel(`inbox-notifications:${caller.id}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    const sendDeclined = (ch: typeof callerChannel) => {
+      try {
+        ch.send({
           type: "broadcast",
           event: "call_declined",
           payload: { callId },
         });
+      } catch {}
+    };
+
+    callerChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendDeclined(callerChannel);
         setTimeout(() => {
-          try {
-            supabase.removeChannel(callerChannel);
-          } catch {}
+          try { supabase.removeChannel(callerChannel); } catch {}
+        }, 1000);
+      }
+    });
+
+    callerInboxChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        sendDeclined(callerInboxChannel);
+        setTimeout(() => {
+          try { supabase.removeChannel(callerInboxChannel); } catch {}
         }, 1000);
       }
     });
