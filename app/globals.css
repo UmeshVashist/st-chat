@@ -1,26 +1,169 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg-main: #eef2f6;
+  --bg-card: #eef2f6;
+  --bg-card-alt: #e6ecf2;
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-light: #dbeafe;
+  --accent: #0ea5e9;
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --border-subtle: rgba(203, 213, 225, 0.4);
+
+  /* Light Neomorphism Shadows */
+  --shadow-raised: 8px 8px 18px rgba(166, 180, 200, 0.65), -8px -8px 18px rgba(255, 255, 255, 0.95);
+  --shadow-raised-sm: 4px 4px 10px rgba(166, 180, 200, 0.5), -4px -4px 10px rgba(255, 255, 255, 0.9);
+  --shadow-raised-lg: 14px 14px 28px rgba(166, 180, 200, 0.6), -14px -14px 28px rgba(255, 255, 255, 1);
+  --shadow-inset: inset 4px 4px 8px rgba(166, 180, 200, 0.6), inset -4px -4px 8px rgba(255, 255, 255, 0.95);
+  --shadow-inset-sm: inset 2px 2px 5px rgba(166, 180, 200, 0.5), inset -2px -2px 5px rgba(255, 255, 255, 0.9);
+  --shadow-floating: 16px 16px 36px rgba(166, 180, 200, 0.65), -16px -16px 36px rgba(255, 255, 255, 1);
+  --shadow-primary: 0 10px 25px -5px rgba(37, 99, 235, 0.4);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+.dark {
+  --bg-main: #111622;
+  --bg-card: #161c2b;
+  --bg-card-alt: #1a2235;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-light: #1e293b;
+  --accent: #38bdf8;
+  --success: #10b981;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --border-subtle: rgba(51, 65, 85, 0.4);
+
+  /* Dark Neomorphism Shadows */
+  --shadow-raised: 6px 6px 16px #0b0e16, -6px -6px 16px #1d2538;
+  --shadow-raised-sm: 3px 3px 8px #0b0e16, -3px -3px 8px #1d2538;
+  --shadow-raised-lg: 12px 12px 28px #090c13, -12px -12px 28px #20293e;
+  --shadow-inset: inset 4px 4px 8px #0c0f18, inset -4px -4px 8px #202a3f;
+  --shadow-inset-sm: inset 2px 2px 5px #0c0f18, inset -2px -2px 5px #202a3f;
+  --shadow-floating: 16px 16px 40px #07090e, -16px -16px 40px #242e45;
+  --shadow-primary: 0 10px 25px -5px rgba(59, 130, 246, 0.35);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  border-color: var(--border-subtle);
+  box-sizing: border-box;
+}
+
+button,
+[role="button"],
+input[type="button"],
+input[type="submit"],
+input[type="reset"],
+a {
+  cursor: pointer;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  min-height: 100vh;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Custom Neomorphism utility classes */
+.neo-raised {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-raised);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-raised-sm {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-raised-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-raised-lg {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-raised-lg);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-inset {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-inset);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-inset-sm {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-inset-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-floating {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-floating);
+  border: 1px solid var(--border-subtle);
+}
+
+.neo-btn {
+  background-color: var(--bg-card);
+  box-shadow: var(--shadow-raised-sm);
+  border: 1px solid var(--border-subtle);
+  transition: all 0.18s ease-in-out;
+}
+
+.neo-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-raised);
+}
+
+.neo-btn:active, .neo-btn.active {
+  transform: translateY(1px);
+  box-shadow: var(--shadow-inset-sm);
+}
+
+.neo-btn-primary {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #ffffff;
+  box-shadow: var(--shadow-primary), var(--shadow-raised-sm);
+  border: none;
+  transition: all 0.2s ease-in-out;
+}
+
+.neo-btn-primary:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 28px -4px rgba(37, 99, 235, 0.5);
+}
+
+.neo-btn-primary:active {
+  transform: translateY(1px);
+  filter: brightness(0.96);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 9999px;
+  opacity: 0.5;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
 }
