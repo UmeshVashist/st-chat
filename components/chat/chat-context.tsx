@@ -1,9 +1,13 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { Conversation, Message, Profile } from "@/types/database";
 import { useAuth } from "@/components/auth/auth-provider";
 import { createClient } from "@/lib/supabase/client";
+import { IncomingCallModal } from "@/components/call/incoming-call-modal";
+import { OutgoingCallModal } from "@/components/call/outgoing-call-modal";
+import { getUserSettings } from "@/lib/settings-service";
 
 interface ChatContextType {
   conversations: Conversation[];
@@ -35,11 +39,13 @@ interface ChatContextType {
   setGroupMemberRole: (conversationId: string, userId: string, role: "admin" | "member") => Promise<void>;
   updateGroupInfo: (conversationId: string, name: string, description?: string, avatarUrl?: string) => Promise<void>;
   leaveGroup: (conversationId: string) => Promise<void>;
+  startCall: (targetUser: { id: string; name: string; avatar?: string }, type: "video" | "audio", conversationId?: string) => void;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const { user } = useAuth();
   const supabase = createClient();
   const userId = user?.id;
@@ -55,6 +61,34 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const activeChannelRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // Call Signaling State
+  interface CallParticipant {
+    id: string;
+    name: string;
+    avatar?: string;
+  }
+
+  const [incomingCall, setIncomingCall] = useState<{
+    callId: string;
+    roomId: string;
+    caller: CallParticipant;
+    callType: "video" | "audio";
+    conversationId?: string;
+  } | null>(null);
+
+  const [outgoingCall, setOutgoingCall] = useState<{
+    callId: string;
+    roomId: string;
+    callee: CallParticipant;
+    callType: "video" | "audio";
+    statusText: string;
+    conversationId?: string;
+  } | null>(null);
+
+  const outgoingCallRef = React.useRef(outgoingCall);
+  outgoingCallRef.current = outgoingCall;
 
   // Live Supabase Presence Tracking for true active/online status
   useEffect(() => {
@@ -80,7 +114,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await presenceChannel.track({
+          const settings = getUserSettings(userId);
+          if (settings.showOnlineStatus) {
+            await presenceChannel.track({
+              user_id: userId,
+              online_at: new Date().toISOString(),
+            });
+            fetch("/api/users/presence", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId, isOnline: true }),
+            }).catch(() => {});
+          }
+        }
+      });
+
+    const handleSettingsUpdate = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      const updated = customEvent.detail;
+      if (updated && typeof updated.showOnlineStatus === "boolean") {
+        if (updated.showOnlineStatus) {
+          presenceChannel.track({
             user_id: userId,
             online_at: new Date().toISOString(),
           });
@@ -89,8 +143,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ userId, isOnline: true }),
           }).catch(() => {});
+        } else {
+          presenceChannel.untrack();
+          fetch("/api/users/presence", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ userId, isOnline: false }),
+          }).catch(() => {});
         }
-      });
+      }
+    };
+
+    window.addEventListener("chatconnect_settings_updated", handleSettingsUpdate);
 
     const handleBeforeUnload = () => {
       presenceChannel.untrack();
@@ -103,6 +167,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
+      window.removeEventListener("chatconnect_settings_updated", handleSettingsUpdate);
       window.removeEventListener("beforeunload", handleBeforeUnload);
       presenceChannel.untrack();
       supabase.removeChannel(presenceChannel);
@@ -216,9 +281,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     fetchMessages();
   }, [activeConversationId, markAsRead]);
 
-  // 4. Supabase Realtime channel for live messages and read status
+  // 4. Supabase Realtime channel for live messages, read receipts, and instant broadcast
   useEffect(() => {
-    if (!activeConversationId) return;
+    if (!activeConversationId) {
+      activeChannelRef.current = null;
+      return;
+    }
 
     const channel = supabase
       .channel(`room:${activeConversationId}`, {
@@ -226,6 +294,60 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           broadcast: { self: false },
         },
       })
+      // A. Instant WebSocket Broadcast from Sender (sub-50ms arrival!)
+      .on("broadcast", { event: "new_message" }, (payload) => {
+        const newMsg = payload.payload?.message as Message;
+        if (!newMsg || newMsg.sender_id === userId) return;
+
+        setMessagesMap((prev) => {
+          const list = prev[activeConversationId] || [];
+          if (list.some((m) => m.id === newMsg.id)) return prev;
+          return {
+            ...prev,
+            [activeConversationId]: [
+              ...list,
+              { ...newMsg, status: "read" },
+            ],
+          };
+        });
+
+        // Mark as read and acknowledge to sender if read receipts enabled
+        markAsRead(activeConversationId);
+        const settings = getUserSettings(userId);
+        if (settings.showReadReceipts) {
+          channel.send({
+            type: "broadcast",
+            event: "messages_read",
+            payload: { conversationId: activeConversationId, readerId: userId },
+          });
+        }
+
+        // Trigger native desktop notification if window is blurred/hidden
+        if (
+          settings.desktopNotifications &&
+          typeof window !== "undefined" &&
+          "Notification" in window &&
+          Notification.permission === "granted" &&
+          document.hidden
+        ) {
+          try {
+            new Notification(newMsg.sender?.full_name || "New Message", {
+              body: newMsg.content || "Sent an attachment",
+              icon: newMsg.sender?.avatar_url || "/favicon.ico",
+            });
+          } catch {}
+        }
+
+        // Update conversation last_message in list
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === activeConversationId
+              ? { ...c, last_message_at: newMsg.created_at, last_message: newMsg }
+              : c
+          )
+        );
+      })
+      // B. Database Change Fallback
       .on(
         "postgres_changes",
         {
@@ -248,7 +370,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             };
           });
 
-          // If incoming message from other user and we are viewing the chat right now:
           if (newMsg.sender_id !== userId) {
             markAsRead(activeConversationId);
             channel.send({
@@ -258,20 +379,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             });
           }
 
-          // Update conversation timestamp
           setConversations((prev) =>
             prev.map((c) =>
               c.id === activeConversationId
-                ? { ...c, last_message_at: newMsg.created_at }
+                ? { ...c, last_message_at: newMsg.created_at, last_message: newMsg }
                 : c
             )
           );
         }
       )
+      // C. Read receipts broadcast (3 checkmarks update)
       .on("broadcast", { event: "messages_read" }, (payload) => {
         const data = payload.payload as { conversationId: string; readerId: string };
         if (data && data.readerId !== userId) {
-          // Other user has read our messages! Update sent messages to read (3 checks)
           setMessagesMap((prev) => {
             const list = prev[activeConversationId] || [];
             return {
@@ -285,7 +405,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       })
       .subscribe((status) => {
         if (status === "SUBSCRIBED" && userId) {
-          // Announce that we are viewing/reading messages in this room
           channel.send({
             type: "broadcast",
             event: "messages_read",
@@ -294,17 +413,51 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
       });
 
+    activeChannelRef.current = channel;
+
     return () => {
+      activeChannelRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [activeConversationId, supabase, userId, markAsRead]);
 
-  // Global message listener for live unread badge increments across all conversations
+  // Active conversation background polling (every 2.5s) to guarantee new messages appear without reloading
+  useEffect(() => {
+    if (!activeConversationId || !userId) return;
+
+    const pollMessagesInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/chat/messages?conversationId=${activeConversationId}`);
+        const data = await res.json();
+        if (data.messages && Array.isArray(data.messages)) {
+          setMessagesMap((prev) => {
+            const current = prev[activeConversationId] || [];
+            if (
+              current.length === data.messages.length &&
+              current[current.length - 1]?.id === data.messages[data.messages.length - 1]?.id
+            ) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [activeConversationId]: data.messages,
+            };
+          });
+        }
+      } catch {}
+    }, 2500);
+
+    return () => clearInterval(pollMessagesInterval);
+  }, [activeConversationId, userId]);
+
+  // Global personal inbox channel for live unread badge and new message alerts
   useEffect(() => {
     if (!userId) return;
 
     const inboxChannel = supabase
-      .channel(`inbox-notifications:${userId}`)
+      .channel(`inbox-notifications:${userId}`, {
+        config: { broadcast: { self: false } },
+      })
       .on(
         "postgres_changes",
         {
@@ -315,35 +468,45 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         (payload) => {
           const newMsg = payload.new as Message;
           if (newMsg.sender_id === userId) return;
-
-          setConversations((prev) => {
-            const hasConv = prev.some((c) => c.id === newMsg.conversation_id);
-            if (!hasConv) {
-              loadConversations();
-              return prev;
-            }
-
-            return prev.map((c) => {
-              if (c.id === newMsg.conversation_id) {
-                const isViewing = activeConversationId === c.id;
-                return {
-                  ...c,
-                  last_message_at: newMsg.created_at,
-                  last_message: newMsg,
-                  unread_count: isViewing ? 0 : (c.unread_count || 0) + 1,
-                };
-              }
-              return c;
-            });
-          });
+          loadConversations();
         }
       )
+      .on("broadcast", { event: "new_message_alert" }, (payload) => {
+        const newMsg = payload.payload?.message as Message;
+        if (!newMsg || newMsg.sender_id === userId) return;
+
+        loadConversations();
+
+        const convId = payload.payload?.conversationId;
+        if (convId && activeConversationId === convId) {
+          setMessagesMap((prev) => {
+            const list = prev[convId] || [];
+            if (list.some((m) => m.id === newMsg.id)) return prev;
+            return {
+              ...prev,
+              [convId]: [...list, { ...newMsg, status: "read" }],
+            };
+          });
+          markAsRead(convId);
+        }
+      })
       .subscribe();
 
     return () => {
       supabase.removeChannel(inboxChannel);
     };
-  }, [userId, supabase, activeConversationId, loadConversations]);
+  }, [userId, supabase, activeConversationId, loadConversations, markAsRead]);
+
+  // Background conversation list polling (every 4s) to ensure unread counts and recent messages stay synced
+  useEffect(() => {
+    if (!userId) return;
+
+    const pollConvsInterval = setInterval(() => {
+      loadConversations();
+    }, 4000);
+
+    return () => clearInterval(pollConvsInterval);
+  }, [userId, loadConversations]);
 
   // 5. Safely persist lightweight conversations and contacts cache (no full messages)
   useEffect(() => {
@@ -443,12 +606,42 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
       const data = await res.json();
       if (data.message) {
+        const confirmedMsg = data.message;
         setMessagesMap((prev) => ({
           ...prev,
           [activeConversationId]: (prev[activeConversationId] || []).map((m) =>
-            m.id === tempId ? { ...data.message, status: data.message.status || "delivered" } : m
+            m.id === tempId ? { ...confirmedMsg, status: confirmedMsg.status || "delivered" } : m
           ),
         }));
+
+        // 1. Instant WebSocket broadcast to other user in active room (sub-50ms)
+        if (activeChannelRef.current) {
+          activeChannelRef.current.send({
+            type: "broadcast",
+            event: "new_message",
+            payload: { message: confirmedMsg },
+          });
+        }
+
+        // 2. Instant alert to recipient personal inbox channel
+        const otherUserId =
+          activeConversation?.other_user?.id ||
+          activeConversation?.members?.find((m) => m.user_id !== userId)?.user_id;
+
+        if (otherUserId) {
+          const alertChan = supabase.channel(`inbox-notifications:${otherUserId}`, {
+            config: { broadcast: { self: false } },
+          });
+          alertChan.subscribe((status) => {
+            if (status === "SUBSCRIBED") {
+              alertChan.send({
+                type: "broadcast",
+                event: "new_message_alert",
+                payload: { message: confirmedMsg, conversationId: activeConversationId },
+              });
+            }
+          });
+        }
       }
     } catch (err) {
       console.error("Error sending message:", err);
@@ -756,6 +949,157 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     return conversations.reduce((total, conv) => total + (conv.unread_count || 0), 0);
   }, [conversations]);
 
+  // Call Signaling Listener on user-calls channel
+  useEffect(() => {
+    if (!userId) return;
+
+    const callChannel = supabase.channel(`user-calls:${userId}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    callChannel
+      .on("broadcast", { event: "incoming_call" }, (payload) => {
+        const data = payload.payload;
+        if (!data || data.callerId === userId) return;
+
+        setIncomingCall({
+          callId: data.callId,
+          roomId: data.roomId,
+          caller: {
+            id: data.callerId,
+            name: data.callerName,
+            avatar: data.callerAvatar,
+          },
+          callType: data.callType || "video",
+          conversationId: data.conversationId,
+        });
+      })
+      .on("broadcast", { event: "call_accepted" }, (payload) => {
+        const data = payload.payload;
+        if (outgoingCallRef.current && outgoingCallRef.current.callId === data.callId) {
+          const out = outgoingCallRef.current;
+          setOutgoingCall(null);
+          router.push(
+            `/call/${out.roomId}?type=${out.callType}&name=${encodeURIComponent(out.callee.name)}&avatar=${encodeURIComponent(out.callee.avatar || "")}&role=caller&callId=${out.callId}`
+          );
+        }
+      })
+      .on("broadcast", { event: "call_declined" }, () => {
+        if (outgoingCallRef.current) {
+          setOutgoingCall((prev) => (prev ? { ...prev, statusText: "Call Declined" } : null));
+          setTimeout(() => {
+            setOutgoingCall(null);
+          }, 1500);
+        }
+      })
+      .on("broadcast", { event: "call_cancelled" }, () => {
+        setIncomingCall(null);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(callChannel);
+    };
+  }, [userId, supabase, router]);
+
+  const startCall = (
+    targetUser: { id: string; name: string; avatar?: string },
+    type: "video" | "audio",
+    conversationId?: string
+  ) => {
+    if (!userId) return;
+
+    const callId = `call-${Date.now()}`;
+    const roomId = `room-${conversationId || "direct"}-${Date.now()}`;
+
+    setOutgoingCall({
+      callId,
+      roomId,
+      callee: targetUser,
+      callType: type,
+      statusText: "Ringing...",
+      conversationId,
+    });
+
+    const targetChannel = supabase.channel(`user-calls:${targetUser.id}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    targetChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        targetChannel.send({
+          type: "broadcast",
+          event: "incoming_call",
+          payload: {
+            callId,
+            roomId,
+            callerId: userId,
+            callerName: user?.full_name || user?.username || "User",
+            callerAvatar: user?.avatar_url,
+            callType: type,
+            conversationId,
+          },
+        });
+      }
+    });
+  };
+
+  const handleCancelOutgoingCall = () => {
+    if (outgoingCall) {
+      const targetChannel = supabase.channel(`user-calls:${outgoingCall.callee.id}`);
+      targetChannel.subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          targetChannel.send({
+            type: "broadcast",
+            event: "call_cancelled",
+            payload: { callId: outgoingCall.callId },
+          });
+        }
+      });
+      setOutgoingCall(null);
+    }
+  };
+
+  const handleAcceptIncomingCall = () => {
+    if (!incomingCall) return;
+    const { callId, roomId, caller, callType } = incomingCall;
+
+    const callerChannel = supabase.channel(`user-calls:${caller.id}`);
+    callerChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        callerChannel.send({
+          type: "broadcast",
+          event: "call_accepted",
+          payload: { callId, roomId },
+        });
+      }
+    });
+
+    setIncomingCall(null);
+
+    router.push(
+      `/call/${roomId}?type=${callType}&name=${encodeURIComponent(caller.name)}&avatar=${encodeURIComponent(caller.avatar || "")}&role=receiver&callId=${callId}`
+    );
+  };
+
+  const handleDeclineIncomingCall = () => {
+    if (!incomingCall) return;
+    const { callId, caller } = incomingCall;
+
+    const callerChannel = supabase.channel(`user-calls:${caller.id}`);
+    callerChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        callerChannel.send({
+          type: "broadcast",
+          event: "call_declined",
+          payload: { callId },
+        });
+      }
+    });
+
+    setIncomingCall(null);
+  };
+
   return (
     <ChatContext.Provider
       value={{
@@ -788,9 +1132,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setGroupMemberRole,
         updateGroupInfo,
         leaveGroup,
+        startCall,
       }}
     >
       {children}
+
+      {/* Global Incoming Call Ringing Modal */}
+      <IncomingCallModal
+        isOpen={!!incomingCall}
+        caller={incomingCall?.caller || null}
+        callType={incomingCall?.callType || "video"}
+        onAccept={handleAcceptIncomingCall}
+        onDecline={handleDeclineIncomingCall}
+      />
+
+      {/* Global Outgoing Call Dialing Modal */}
+      <OutgoingCallModal
+        isOpen={!!outgoingCall}
+        callee={outgoingCall?.callee || null}
+        callType={outgoingCall?.callType || "video"}
+        statusText={outgoingCall?.statusText || "Calling..."}
+        onCancel={handleCancelOutgoingCall}
+      />
     </ChatContext.Provider>
   );
 }
@@ -828,6 +1191,7 @@ export function useChat() {
       setGroupMemberRole: async () => {},
       updateGroupInfo: async () => {},
       leaveGroup: async () => {},
+      startCall: () => {},
     };
   }
   return context;

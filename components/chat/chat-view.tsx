@@ -93,6 +93,7 @@ export function ChatView({ onBack }: ChatViewProps) {
     replyingTo,
     setReplyingTo,
     isUserOnline,
+    startCall,
   } = useChat();
 
   const [inputText, setInputText] = React.useState("");
@@ -243,10 +244,23 @@ export function ChatView({ onBack }: ChatViewProps) {
       duration: "00m 00s",
     });
 
-    const roomId = `room-${activeConversation.id}-${Date.now()}`;
-    router.push(
-      `/call/${roomId}?type=${type}&name=${encodeURIComponent(targetName)}&callId=${callId}&avatar=${encodeURIComponent(targetAvatar)}`
-    );
+    const targetUserId = otherProfile?.id || otherMember?.user_id;
+    if (targetUserId && startCall) {
+      startCall(
+        {
+          id: targetUserId,
+          name: targetName,
+          avatar: targetAvatar,
+        },
+        type,
+        activeConversation.id
+      );
+    } else {
+      const roomId = `room-${activeConversation.id}-${Date.now()}`;
+      router.push(
+        `/call/${roomId}?type=${type}&name=${encodeURIComponent(targetName)}&callId=${callId}&avatar=${encodeURIComponent(targetAvatar)}`
+      );
+    }
   };
 
   const filteredMessages = messages.filter((m) => {

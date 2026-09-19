@@ -24,6 +24,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/auth/auth-provider";
 import { Avatar } from "@/components/ui/avatar";
+import { getUserSettings, saveUserSettings } from "@/lib/settings-service";
 import Link from "next/link";
 
 export default function SettingsPage() {
@@ -36,6 +37,44 @@ export default function SettingsPage() {
   const [showReadReceipts, setShowReadReceipts] = React.useState(true);
   const [showOnlineStatus, setShowOnlineStatus] = React.useState(true);
   const [isUploadingPhoto, setIsUploadingPhoto] = React.useState(false);
+
+  // Load saved preferences on mount or when user changes
+  React.useEffect(() => {
+    const s = getUserSettings(user?.id);
+    setSoundEnabled(s.soundEnabled);
+    setDesktopNotifications(s.desktopNotifications);
+    setShowOnlineStatus(s.showOnlineStatus);
+    setShowReadReceipts(s.showReadReceipts);
+  }, [user?.id]);
+
+  const handleToggleSound = (checked: boolean) => {
+    setSoundEnabled(checked);
+    saveUserSettings(user?.id, { soundEnabled: checked });
+    toast.success(checked ? "Incoming call ringtone enabled" : "Incoming call ringtone muted");
+  };
+
+  const handleToggleDesktopNotifications = async (checked: boolean) => {
+    setDesktopNotifications(checked);
+    saveUserSettings(user?.id, { desktopNotifications: checked });
+    if (checked && typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+    }
+    toast.success(checked ? "Desktop notifications enabled" : "Desktop notifications disabled");
+  };
+
+  const handleToggleOnlineStatus = (checked: boolean) => {
+    setShowOnlineStatus(checked);
+    saveUserSettings(user?.id, { showOnlineStatus: checked });
+    toast.success(checked ? "Online presence status visible" : "Online presence status hidden");
+  };
+
+  const handleToggleReadReceipts = (checked: boolean) => {
+    setShowReadReceipts(checked);
+    saveUserSettings(user?.id, { showReadReceipts: checked });
+    toast.success(checked ? "Read receipts (ticks) enabled" : "Read receipts disabled");
+  };
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -309,7 +348,7 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={soundEnabled}
-                onChange={(e) => setSoundEnabled(e.target.checked)}
+                onChange={(e) => handleToggleSound(e.target.checked)}
                 className="w-4 h-4 rounded text-[var(--primary)] cursor-pointer"
               />
             </div>
@@ -329,7 +368,7 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={desktopNotifications}
-                onChange={(e) => setDesktopNotifications(e.target.checked)}
+                onChange={(e) => handleToggleDesktopNotifications(e.target.checked)}
                 className="w-4 h-4 rounded text-[var(--primary)] cursor-pointer"
               />
             </div>
@@ -349,7 +388,7 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={showOnlineStatus}
-                onChange={(e) => setShowOnlineStatus(e.target.checked)}
+                onChange={(e) => handleToggleOnlineStatus(e.target.checked)}
                 className="w-4 h-4 rounded text-[var(--primary)] cursor-pointer"
               />
             </div>
@@ -369,7 +408,7 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={showReadReceipts}
-                onChange={(e) => setShowReadReceipts(e.target.checked)}
+                onChange={(e) => handleToggleReadReceipts(e.target.checked)}
                 className="w-4 h-4 rounded text-[var(--primary)] cursor-pointer"
               />
             </div>

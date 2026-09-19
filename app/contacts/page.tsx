@@ -20,7 +20,7 @@ import { saveCallLog } from "@/lib/call-service";
 function ContactsContent() {
   const router = useRouter();
   const { user } = useAuth();
-  const { contacts, createDirectChat, deleteContact } = useChat();
+  const { contacts, createDirectChat, deleteContact, startCall } = useChat();
   const [search, setSearch] = React.useState("");
   const [isModalOpen, setIsModalOpen] = React.useState(false);
   const [contactToDelete, setContactToDelete] = React.useState<Profile | null>(null);
@@ -57,10 +57,21 @@ function ContactsContent() {
       duration: "00m 00s",
     });
 
-    const roomId = `room-direct-${contactUserId}-${Date.now()}`;
-    router.push(
-      `/call/${roomId}?type=${type}&name=${encodeURIComponent(targetName)}&callId=${callId}&avatar=${encodeURIComponent(targetAvatar)}`
-    );
+    if (contact && startCall) {
+      startCall(
+        {
+          id: contact.id,
+          name: targetName,
+          avatar: targetAvatar,
+        },
+        type
+      );
+    } else {
+      const roomId = `room-direct-${contactUserId}-${Date.now()}`;
+      router.push(
+        `/call/${roomId}?type=${type}&name=${encodeURIComponent(targetName)}&callId=${callId}&avatar=${encodeURIComponent(targetAvatar)}`
+      );
+    }
   };
 
   return (

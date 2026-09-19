@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/components/auth/auth-provider";
+import { useChat } from "@/components/chat/chat-context";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -31,6 +32,7 @@ import {
 export default function CallsPage() {
   const router = useRouter();
   const { user, isDemoUser } = useAuth();
+  const { contacts, startCall } = useChat();
   const userId = user?.id || "guest";
 
   const [callLogs, setCallLogs] = React.useState<CallLog[]>([]);
@@ -65,10 +67,28 @@ export default function CallsPage() {
       direction: "outgoing",
       duration: "00m 00s",
     });
-    const roomId = `room-${encodeURIComponent(name.toLowerCase().replace(/\s+/g, "-"))}-${Date.now()}`;
-    router.push(
-      `/call/${roomId}?type=${type}&name=${encodeURIComponent(name)}&callId=${callId}&avatar=${encodeURIComponent(avatar || "")}`
+
+    const matchedContact = contacts?.find(
+      (c) =>
+        c.full_name?.toLowerCase() === name.toLowerCase() ||
+        (c.username && c.username.toLowerCase() === name.toLowerCase())
     );
+
+    if (matchedContact && startCall) {
+      startCall(
+        {
+          id: matchedContact.id,
+          name,
+          avatar,
+        },
+        type
+      );
+    } else {
+      const roomId = `room-${encodeURIComponent(name.toLowerCase().replace(/\s+/g, "-"))}-${Date.now()}`;
+      router.push(
+        `/call/${roomId}?type=${type}&name=${encodeURIComponent(name)}&callId=${callId}&avatar=${encodeURIComponent(avatar || "")}`
+      );
+    }
   };
 
   const handleDeleteCall = (id: string) => {
