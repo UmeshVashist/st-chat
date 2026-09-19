@@ -244,8 +244,18 @@ export function ChatView({ onBack }: ChatViewProps) {
       duration: "00m 00s",
     });
 
-    const targetUserId = otherProfile?.id || otherMember?.user_id;
-    if (targetUserId && startCall) {
+    const targetUserId =
+      otherProfile?.id ||
+      activeConversation.other_user?.id ||
+      otherMember?.user_id ||
+      activeConversation.members?.find((m) => m.user_id !== user?.id)?.user_id;
+
+    if (!targetUserId) {
+      alert("Unable to start call: Contact could not be identified.");
+      return;
+    }
+
+    if (startCall) {
       startCall(
         {
           id: targetUserId,
@@ -254,11 +264,6 @@ export function ChatView({ onBack }: ChatViewProps) {
         },
         type,
         activeConversation.id
-      );
-    } else {
-      const roomId = `room-${activeConversation.id}-${Date.now()}`;
-      router.push(
-        `/call/${roomId}?type=${type}&name=${encodeURIComponent(targetName)}&callId=${callId}&avatar=${encodeURIComponent(targetAvatar)}`
       );
     }
   };

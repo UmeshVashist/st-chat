@@ -47,7 +47,7 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { user } = useAuth();
-  const supabase = createClient();
+  const supabase = React.useMemo(() => createClient(), []);
   const userId = user?.id;
 
   // Real data state - starts clean without mock seed data
@@ -89,6 +89,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const outgoingCallRef = React.useRef(outgoingCall);
   outgoingCallRef.current = outgoingCall;
+  const outgoingTargetChannelRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const outgoingPingIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  const cleanupOutgoingCall = React.useCallback(() => {
+    if (outgoingPingIntervalRef.current) {
+      clearInterval(outgoingPingIntervalRef.current);
+      outgoingPingIntervalRef.current = null;
+    }
+    if (outgoingTargetChannelRef.current) {
+      try {
+        supabase.removeChannel(outgoingTargetChannelRef.current);
+      } catch {}
+      outgoingTargetChannelRef.current = null;
+    }
+  }, [supabase]);
 
   // Live Supabase Presence Tracking for true active/online status
   useEffect(() => {
@@ -526,6 +541,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           ? {
               id: c.last_message.id,
               content: c.last_message.content,
+              media_type: c.last_message.media_type,
+              media_url: c.last_message.media_url,
               created_at: c.last_message.created_at,
               sender_id: c.last_message.sender_id,
             }
@@ -588,6 +605,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       [activeConversationId]: [...(prev[activeConversationId] || []), optimisticMessage],
     }));
 
+    // Optimistically update conversations list with latest message and sort newest first
+    setConversations((prev) => {
+      const updated = prev.map((c) =>
+        c.id === activeConversationId
+          ? {
+              ...c,
+              last_message_at: optimisticMessage.created_at,
+              last_message: optimisticMessage,
+            }
+          : c
+      );
+      return [...updated].sort(
+        (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
+      );
+    });
+
     setReplyingTo(null);
 
     try {
@@ -613,6 +646,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             m.id === tempId ? { ...confirmedMsg, status: confirmedMsg.status || "delivered" } : m
           ),
         }));
+
+        // Keep conversation last message in sync with server confirmed record
+        setConversations((prev) => {
+          const updated = prev.map((c) =>
+            c.id === activeConversationId
+              ? {
+                  ...c,
+                  last_message_at: confirmedMsg.created_at,
+                  last_message: confirmedMsg,
+                }
+              : c
+          );
+          return [...updated].sort(
+            (a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
+          );
+        });
 
         // 1. Instant WebSocket broadcast to other user in active room (sub-50ms)
         if (activeChannelRef.current) {
@@ -985,6 +1034,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
       })
       .on("broadcast", { event: "call_declined" }, () => {
+        cleanupOutgoingCall();
         if (outgoingCallRef.current) {
           setOutgoingCall((prev) => (prev ? { ...prev, statusText: "Call Declined" } : null));
           setTimeout(() => {
@@ -1000,7 +1050,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     return () => {
       supabase.removeChannel(callChannel);
     };
-  }, [userId, supabase, router]);
+  }, [userId, supabase, router, cleanupOutgoingCall]);
 
   const startCall = (
     targetUser: { id: string; name: string; avatar?: string },
@@ -1008,6 +1058,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     conversationId?: string
   ) => {
     if (!userId) return;
+
+    // Clean up previous call timers and channels
+    cleanupOutgoingCall();
 
     const callId = `call-${Date.now()}`;
     const roomId = `room-${conversationId || "direct"}-${Date.now()}`;
@@ -1021,41 +1074,77 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       conversationId,
     });
 
+    // Remove any previous cached channel for this target from supabase client
+    const existing = supabase.getChannels().find((c) => c.topic === `realtime:user-calls:${targetUser.id}`);
+    if (existing) {
+      try {
+        supabase.removeChannel(existing);
+      } catch {}
+    }
+
     const targetChannel = supabase.channel(`user-calls:${targetUser.id}`, {
       config: { broadcast: { self: false } },
     });
+    outgoingTargetChannelRef.current = targetChannel;
+
+    const callPayload = {
+      callId,
+      roomId,
+      callerId: userId,
+      callerName: user?.full_name || user?.username || "User",
+      callerAvatar: user?.avatar_url,
+      callType: type,
+      conversationId,
+    };
 
     targetChannel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         targetChannel.send({
           type: "broadcast",
           event: "incoming_call",
-          payload: {
-            callId,
-            roomId,
-            callerId: userId,
-            callerName: user?.full_name || user?.username || "User",
-            callerAvatar: user?.avatar_url,
-            callType: type,
-            conversationId,
-          },
+          payload: callPayload,
         });
       }
     });
+
+    // Repeat ping every 2s for up to 30s while ringing to ensure guaranteed delivery
+    const pingInterval = setInterval(() => {
+      if (outgoingCallRef.current && outgoingCallRef.current.callId === callId) {
+        targetChannel.send({
+          type: "broadcast",
+          event: "incoming_call",
+          payload: callPayload,
+        });
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 2000);
+    outgoingPingIntervalRef.current = pingInterval;
+
+    // Auto timeout after 35s if unanswered
+    setTimeout(() => {
+      if (outgoingCallRef.current && outgoingCallRef.current.callId === callId) {
+        cleanupOutgoingCall();
+        setOutgoingCall((prev) => (prev ? { ...prev, statusText: "Unavailable" } : null));
+        setTimeout(() => {
+          setOutgoingCall(null);
+        }, 2000);
+      }
+    }, 35000);
   };
 
   const handleCancelOutgoingCall = () => {
     if (outgoingCall) {
-      const targetChannel = supabase.channel(`user-calls:${outgoingCall.callee.id}`);
-      targetChannel.subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          targetChannel.send({
+      if (outgoingTargetChannelRef.current) {
+        try {
+          outgoingTargetChannelRef.current.send({
             type: "broadcast",
             event: "call_cancelled",
             payload: { callId: outgoingCall.callId },
           });
-        }
-      });
+        } catch {}
+      }
+      cleanupOutgoingCall();
       setOutgoingCall(null);
     }
   };
@@ -1064,7 +1153,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!incomingCall) return;
     const { callId, roomId, caller, callType } = incomingCall;
 
-    const callerChannel = supabase.channel(`user-calls:${caller.id}`);
+    const existing = supabase.getChannels().find((c) => c.topic === `realtime:user-calls:${caller.id}`);
+    if (existing) {
+      try {
+        supabase.removeChannel(existing);
+      } catch {}
+    }
+
+    const callerChannel = supabase.channel(`user-calls:${caller.id}`, {
+      config: { broadcast: { self: false } },
+    });
     callerChannel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         callerChannel.send({
@@ -1072,6 +1170,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           event: "call_accepted",
           payload: { callId, roomId },
         });
+        setTimeout(() => {
+          try {
+            supabase.removeChannel(callerChannel);
+          } catch {}
+        }, 1000);
       }
     });
 
@@ -1086,7 +1189,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (!incomingCall) return;
     const { callId, caller } = incomingCall;
 
-    const callerChannel = supabase.channel(`user-calls:${caller.id}`);
+    const existing = supabase.getChannels().find((c) => c.topic === `realtime:user-calls:${caller.id}`);
+    if (existing) {
+      try {
+        supabase.removeChannel(existing);
+      } catch {}
+    }
+
+    const callerChannel = supabase.channel(`user-calls:${caller.id}`, {
+      config: { broadcast: { self: false } },
+    });
     callerChannel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         callerChannel.send({
@@ -1094,6 +1206,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           event: "call_declined",
           payload: { callId },
         });
+        setTimeout(() => {
+          try {
+            supabase.removeChannel(callerChannel);
+          } catch {}
+        }, 1000);
       }
     });
 

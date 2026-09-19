@@ -19,6 +19,8 @@ import {
   AlertCircle,
   RefreshCw,
   Maximize2,
+  Volume2,
+  Smartphone,
 } from "lucide-react";
 
 interface CallRoomProps {
@@ -46,7 +48,9 @@ export function CallRoom({ roomId }: CallRoomProps) {
   const [duration, setDuration] = React.useState(0);
   const [mediaPermissionDenied, setMediaPermissionDenied] = React.useState(false);
   const [hasRemoteVideo, setHasRemoteVideo] = React.useState(false);
+  const [isCallConnected, setIsCallConnected] = React.useState(false);
   const [swappedViews, setSwappedViews] = React.useState(false);
+  const [audioMode, setAudioMode] = React.useState<"speaker" | "earpiece">("speaker");
 
   const localVideoRef = React.useRef<HTMLVideoElement>(null);
   const remoteVideoRef = React.useRef<HTMLVideoElement>(null);
@@ -72,13 +76,15 @@ export function CallRoom({ roomId }: CallRoomProps) {
     };
   }, [userId, callId, roomName, avatarParam, callType, role]);
 
-  // Call duration timer
+  // Call duration timer - ONLY starts when the call is actually connected!
   React.useEffect(() => {
+    if (!isCallConnected) return;
+
     const timer = setInterval(() => {
       setDuration((prev) => prev + 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isCallConnected]);
 
   // 1. Get Local Camera & Audio Stream
   React.useEffect(() => {
@@ -174,7 +180,15 @@ export function CallRoom({ roomId }: CallRoomProps) {
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = event.streams[0];
           setHasRemoteVideo(true);
+          setIsCallConnected(true);
         }
+      }
+    };
+
+    // Connection state change
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        setIsCallConnected(true);
       }
     };
 
@@ -202,6 +216,7 @@ export function CallRoom({ roomId }: CallRoomProps) {
               event: "answer",
               payload: { answer, from: userId },
             });
+            setIsCallConnected(true);
           } catch (e) {
             console.warn("Error handling offer:", e);
           }
@@ -211,10 +226,14 @@ export function CallRoom({ roomId }: CallRoomProps) {
         if (payload.payload?.from !== userId && payload.payload?.answer) {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(payload.payload.answer));
+            setIsCallConnected(true);
           } catch (e) {
             console.warn("Error handling answer:", e);
           }
         }
+      })
+      .on("broadcast", { event: "call_connected" }, () => {
+        setIsCallConnected(true);
       })
       .on("broadcast", { event: "ice-candidate" }, async (payload) => {
         if (payload.payload?.from !== userId && payload.payload?.candidate) {
@@ -301,6 +320,58 @@ export function CallRoom({ roomId }: CallRoomProps) {
     }
   };
 
+  // Toggle Speaker / Earpiece Audio Route
+  const toggleAudioOutput = async () => {
+    const nextMode = audioMode === "speaker" ? "earpiece" : "speaker";
+    setAudioMode(nextMode);
+
+    try {
+      const activeMedia = remoteVideoRef.current as (HTMLVideoElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+      if (!activeMedia) return;
+
+      if (typeof activeMedia.setSinkId === "function" && navigator.mediaDevices?.enumerateDevices) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioOutputs = devices.filter((d) => d.kind === "audiooutput");
+
+        if (nextMode === "earpiece") {
+          // Find communications earpiece/receiver or headset
+          const earpiece = audioOutputs.find(
+            (d) =>
+              d.label.toLowerCase().includes("earpiece") ||
+              d.label.toLowerCase().includes("receiver") ||
+              d.label.toLowerCase().includes("handset") ||
+              d.label.toLowerCase().includes("phone") ||
+              d.label.toLowerCase().includes("headset") ||
+              d.label.toLowerCase().includes("headphone")
+          );
+          if (earpiece && earpiece.deviceId) {
+            await activeMedia.setSinkId(earpiece.deviceId);
+          } else {
+            activeMedia.volume = 0.35;
+          }
+        } else {
+          // Loudspeaker: reset to default/speaker
+          const speaker = audioOutputs.find(
+            (d) =>
+              d.label.toLowerCase().includes("speaker") ||
+              d.deviceId === "default"
+          );
+          if (speaker && speaker.deviceId) {
+            await activeMedia.setSinkId(speaker.deviceId);
+          }
+          activeMedia.volume = 1.0;
+        }
+      } else {
+        activeMedia.volume = nextMode === "earpiece" ? 0.35 : 1.0;
+      }
+    } catch (e) {
+      console.warn("Audio output route switch:", e);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.volume = nextMode === "earpiece" ? 0.35 : 1.0;
+      }
+    }
+  };
+
   return (
     <div className="relative w-screen h-screen bg-[#0a0e17] text-white flex flex-col overflow-hidden select-none">
       {/* Top Floating Glass Header */}
@@ -311,11 +382,22 @@ export function CallRoom({ roomId }: CallRoomProps) {
           </div>
           <div>
             <h1 className="text-sm sm:text-base font-bold truncate max-w-[160px] sm:max-w-xs">{roomName}</h1>
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="font-mono">{formatDuration(duration)}</span>
-              <span>•</span>
-              <span className="capitalize">{callType} Call</span>
+            <div className="flex items-center gap-2 text-xs">
+              {isCallConnected ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="font-mono text-zinc-300">{formatDuration(duration)}</span>
+                  <span className="text-zinc-500">•</span>
+                  <span className="capitalize text-zinc-400">{callType} Call</span>
+                </>
+              ) : (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                  <span className="font-semibold text-amber-300">
+                    {role === "caller" ? "Calling..." : "Connecting..."}
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -372,12 +454,44 @@ export function CallRoom({ roomId }: CallRoomProps) {
             <h2 className="text-2xl font-bold text-white tracking-tight">
               {swappedViews ? `${user?.full_name || "You"} (You)` : roomName}
             </h2>
-            <div className="flex items-center gap-2 text-xs text-zinc-300 bg-black/40 px-3 py-1 rounded-full backdrop-blur-md">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="font-mono">{formatDuration(duration)}</span>
-              <span>•</span>
-              <span className="capitalize">{callType === "video" ? "Video Calling..." : "Voice Call"}</span>
+            <div className="flex items-center gap-2 text-xs">
+              {isCallConnected ? (
+                <div className="flex items-center gap-2 text-zinc-300 bg-black/40 px-3 py-1 rounded-full backdrop-blur-md">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="font-mono">{formatDuration(duration)}</span>
+                  <span>•</span>
+                  <span className="capitalize">{callType === "video" ? "Video Call" : "Voice Call"}</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-amber-300 bg-black/60 px-4 py-1.5 rounded-full backdrop-blur-md border border-amber-500/20">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                  <span className="font-semibold">{role === "caller" ? "Calling..." : "Connecting..."}</span>
+                </div>
+              )}
             </div>
+
+            {/* Voice Call Audio Route (Speaker vs Ear) Switcher Badge */}
+            {callType === "audio" && (
+              <button
+                type="button"
+                onClick={toggleAudioOutput}
+                className="mt-3 inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-medium text-white shadow-lg backdrop-blur-md transition-all active:scale-95 cursor-pointer"
+                title="Tap to toggle between Speaker and Earpiece audio"
+              >
+                {audioMode === "speaker" ? (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Audio: <strong className="text-emerald-300">Speaker (Loud)</strong></span>
+                  </>
+                ) : (
+                  <>
+                    <Smartphone className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Audio: <strong className="text-amber-300">Earpiece / Ear</strong></span>
+                  </>
+                )}
+                <span className="text-[10px] text-zinc-400 border-l border-white/20 pl-2 ml-1">Change</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -443,6 +557,31 @@ export function CallRoom({ roomId }: CallRoomProps) {
         >
           {micMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
         </button>
+
+        {/* Speaker / Earpiece Toggle Button (Voice Calls) */}
+        {callType === "audio" && (
+          <button
+            type="button"
+            onClick={toggleAudioOutput}
+            className={cn(
+              "w-12 h-12 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer relative",
+              audioMode === "speaker"
+                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/30"
+                : "bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
+            )}
+            aria-label={`Current audio route: ${audioMode === "speaker" ? "Speaker" : "Earpiece"}. Tap to switch.`}
+            title={audioMode === "speaker" ? "Current: Speaker (Loud) - Tap for Earpiece / Ear" : "Current: Earpiece / Ear - Tap for Speaker (Loud)"}
+          >
+            {audioMode === "speaker" ? (
+              <Volume2 className="w-5 h-5" />
+            ) : (
+              <Smartphone className="w-5 h-5" />
+            )}
+            <span className="text-[9px] font-semibold leading-none mt-0.5">
+              {audioMode === "speaker" ? "Spk" : "Ear"}
+            </span>
+          </button>
+        )}
 
         {/* Video Toggle Button */}
         {callType === "video" && (

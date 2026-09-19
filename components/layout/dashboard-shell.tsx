@@ -6,7 +6,7 @@ import { SidebarNav } from "./sidebar-nav";
 import { BottomNav } from "./bottom-nav";
 import { useAuth } from "@/components/auth/auth-provider";
 import { useTheme } from "@/components/theme-provider";
-import { MessageSquare, Sun, Moon, Sparkles, Loader2 } from "lucide-react";
+import { MessageSquare, Sun, Moon, Sparkles, Loader2, LogOut } from "lucide-react";
 import Link from "next/link";
 import { BrandIcon } from "@/components/ui/brand-icon";
 import { Avatar } from "../ui/avatar";
@@ -17,7 +17,7 @@ interface DashboardShellProps {
 }
 
 export function DashboardShell({ children }: DashboardShellProps) {
-  const { user, isLoading, isDemoUser } = useAuth();
+  const { user, isLoading, isDemoUser, logout } = useAuth();
   const { resolvedTheme, toggleTheme } = useTheme();
   const router = useRouter();
 
@@ -82,6 +82,18 @@ export function DashboardShell({ children }: DashboardShellProps) {
                 status="online"
               />
             </Link>
+
+            <button
+              onClick={async () => {
+                await logout();
+                router.replace("/auth/login");
+              }}
+              className="w-9 h-9 rounded-xl neo-btn flex items-center justify-center text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
+              title="Sign Out"
+              aria-label="Sign Out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </header>
 

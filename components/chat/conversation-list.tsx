@@ -94,6 +94,35 @@ export function ConversationList({
     }
   };
 
+  const getLastMessageSnippet = (conv: (typeof filteredConversations)[0]) => {
+    const msg = conv.last_message;
+    if (!msg) {
+      return conv.type === "group" ? "Group created" : "No messages yet";
+    }
+
+    const isMe = Boolean(user?.id && msg.sender_id === user.id);
+    const prefix = isMe ? "You: " : "";
+
+    if (msg.media_type === "image" || (msg.media_url && msg.media_url.match(/\.(jpg|jpeg|png|gif|webp)/i))) {
+      return `${prefix}📷 ${msg.content ? msg.content.trim() : "Photo"}`;
+    }
+    if (msg.media_type === "video" || (msg.media_url && msg.media_url.match(/\.(mp4|mov|webm)/i))) {
+      return `${prefix}🎥 ${msg.content ? msg.content.trim() : "Video"}`;
+    }
+    if (msg.media_type === "audio" || (msg.media_url && msg.media_url.match(/\.(mp3|wav|ogg|m4a)/i))) {
+      return `${prefix}🎵 ${msg.content ? msg.content.trim() : "Audio"}`;
+    }
+    if (msg.media_type === "pdf" || msg.media_type === "file" || (msg.media_url && msg.media_url.match(/\.(pdf|doc|docx|zip)/i))) {
+      return `${prefix}📄 ${msg.content ? msg.content.trim() : "Document"}`;
+    }
+
+    if (msg.content) {
+      return `${prefix}${msg.content.trim()}`;
+    }
+
+    return `${prefix}Message`;
+  };
+
   return (
     <div className="flex flex-col h-full w-full bg-[var(--bg-main)] border-r border-[var(--border-subtle)]">
       {/* Top Header */}
@@ -197,15 +226,18 @@ export function ConversationList({
             return (
               <div
                 key={conv.id}
-                onClick={() => handleSelect(conv.id)}
+                onClick={() => {
+                  setActiveConversationId(conv.id);
+                  onSelectConversation?.(conv.id);
+                }}
                 className={cn(
-                  "group flex items-center gap-3 p-3 rounded-2xl cursor-pointer transition-all duration-150 select-none",
+                  "w-full flex items-center gap-3 p-3 rounded-2xl transition-all text-left cursor-pointer group select-none relative",
                   isSelected
-                    ? "neo-inset bg-[var(--bg-card)] ring-1 ring-[var(--primary)]/20"
-                    : "hover:bg-[var(--bg-card-alt)] neo-raised-sm bg-[var(--bg-card)]"
+                    ? "neo-inset scale-[0.99] border-l-4 border-[var(--primary)]"
+                    : "neo-card hover:bg-[var(--bg-card)]/80"
                 )}
               >
-                {/* Avatar */}
+                {/* Avatar with live online ring */}
                 <div className="relative shrink-0">
                   <Avatar
                     src={conv._displayAvatar}
@@ -245,18 +277,17 @@ export function ConversationList({
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-between gap-1">
+                  <div className="flex items-center justify-between gap-1 min-w-0">
                     <p
+                      title={getLastMessageSnippet(conv)}
                       className={cn(
-                        "text-xs truncate",
+                        "text-xs truncate flex-1 min-w-0 tracking-tight",
                         conv.unread_count && conv.unread_count > 0
                           ? "font-semibold text-[var(--text-primary)]"
                           : "text-[var(--text-secondary)]"
                       )}
                     >
-                      {conv.last_message?.content ||
-                        conv.description ||
-                        (conv.type === "group" ? "Team group chat" : "Tap to open chat")}
+                      {getLastMessageSnippet(conv)}
                     </p>
                     <div className="flex items-center gap-1.5 shrink-0 ml-1">
                       {conv.unread_count && conv.unread_count > 0 ? (

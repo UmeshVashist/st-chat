@@ -180,7 +180,20 @@ export default function CallsPage() {
                     <h3 className="text-sm font-bold text-[var(--text-primary)] truncate">
                       {call.name}
                     </h3>
-                    <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-0.5">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] mt-1">
+                      {/* Call Type Badge (Voice or Video Call) */}
+                      {call.type === "video" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-400 font-semibold text-[10px] border border-blue-500/20">
+                          <Video className="w-3 h-3" /> Video Call
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold text-[10px] border border-emerald-500/20">
+                          <Phone className="w-3 h-3" /> Voice Call
+                        </span>
+                      )}
+
+                      <span>•</span>
+
                       {call.direction === "incoming" && (
                         <span className="flex items-center gap-1 text-emerald-500 font-medium">
                           <ArrowDownLeft className="w-3.5 h-3.5" /> Incoming

@@ -20,17 +20,21 @@ import {
   UploadCloud,
   Loader2,
   ExternalLink,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/auth/auth-provider";
 import { Avatar } from "@/components/ui/avatar";
 import { getUserSettings, saveUserSettings } from "@/lib/settings-service";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 export default function SettingsPage() {
+  const router = useRouter();
   const { theme, setTheme } = useTheme();
   const { toast } = useToast();
-  const { user, updateProfile } = useAuth();
+  const { user, updateProfile, logout } = useAuth();
+  const [isSigningOut, setIsSigningOut] = React.useState(false);
 
   const [soundEnabled, setSoundEnabled] = React.useState(true);
   const [desktopNotifications, setDesktopNotifications] = React.useState(true);
@@ -415,7 +419,66 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        
+        {/* Account & Session / Sign Out Section (Specially for Mobile & Desktop) */}
+        <Card className="p-6 neo-card border border-rose-500/25 bg-gradient-to-br from-[var(--bg-card)] to-rose-500/5">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-2xl bg-rose-500/10 text-rose-500 flex items-center justify-center">
+              <LogOut className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-[var(--text-primary)]">
+                Account & Session
+              </h2>
+              <p className="text-xs text-[var(--text-secondary)]">
+                Manage your active session or sign out on mobile and desktop
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-2xl neo-inset-sm border border-rose-500/15 bg-[var(--bg-card)]">
+            <div>
+              <p className="text-xs font-bold text-[var(--text-primary)]">
+                Sign Out of ChatConnect
+              </p>
+              <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                Logged in as <strong className="text-[var(--text-primary)]">{user?.full_name || user?.username || user?.phone_number || "User"}</strong>. Sign out to end your session.
+              </p>
+            </div>
+
+            <Button
+              type="button"
+              variant="danger"
+              onClick={async () => {
+                try {
+                  setIsSigningOut(true);
+                  await logout();
+                  toast.success("Successfully logged out");
+                  router.replace("/auth/login");
+                } catch (err) {
+                  console.error("Logout error:", err);
+                  toast.error("Logged out");
+                  router.replace("/auth/login");
+                } finally {
+                  setIsSigningOut(false);
+                }
+              }}
+              disabled={isSigningOut}
+              className="w-full sm:w-auto px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-95 shrink-0"
+            >
+              {isSigningOut ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Signing Out...</span>
+                </>
+              ) : (
+                <>
+                  <LogOut className="w-4 h-4" />
+                  <span>Sign Out</span>
+                </>
+              )}
+            </Button>
+          </div>
+        </Card>
       </div>
     </DashboardShell>
   );
