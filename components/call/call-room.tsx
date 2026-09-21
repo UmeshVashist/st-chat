@@ -477,7 +477,7 @@ export function CallRoom({ roomId }: CallRoomProps) {
     setAudioMode(nextMode);
 
     try {
-      const activeMedia = (remoteAudioRef.current || remoteVideoRef.current) as (HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+      const activeMedia = (remoteAudioRef.current || fullscreenVideoRef.current) as (HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }) | null;
       if (!activeMedia) return;
 
       if (typeof activeMedia.setSinkId === "function" && navigator.mediaDevices?.enumerateDevices) {
@@ -497,8 +497,8 @@ export function CallRoom({ roomId }: CallRoomProps) {
           );
           if (earpiece && earpiece.deviceId) {
             await activeMedia.setSinkId(earpiece.deviceId);
-            if (remoteVideoRef.current && typeof (remoteVideoRef.current as any).setSinkId === "function") {
-              await (remoteVideoRef.current as any).setSinkId(earpiece.deviceId);
+            if (fullscreenVideoRef.current && typeof (fullscreenVideoRef.current as any).setSinkId === "function") {
+              await (fullscreenVideoRef.current as any).setSinkId(earpiece.deviceId);
             }
           } else {
             activeMedia.volume = 0.35;
@@ -512,8 +512,8 @@ export function CallRoom({ roomId }: CallRoomProps) {
           );
           if (speaker && speaker.deviceId) {
             await activeMedia.setSinkId(speaker.deviceId);
-            if (remoteVideoRef.current && typeof (remoteVideoRef.current as any).setSinkId === "function") {
-              await (remoteVideoRef.current as any).setSinkId(speaker.deviceId);
+            if (fullscreenVideoRef.current && typeof (fullscreenVideoRef.current as any).setSinkId === "function") {
+              await (fullscreenVideoRef.current as any).setSinkId(speaker.deviceId);
             }
           }
           activeMedia.volume = 1.0;
@@ -526,8 +526,8 @@ export function CallRoom({ roomId }: CallRoomProps) {
       if (remoteAudioRef.current) {
         remoteAudioRef.current.volume = nextMode === "earpiece" ? 0.35 : 1.0;
       }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.volume = nextMode === "earpiece" ? 0.35 : 1.0;
+      if (fullscreenVideoRef.current) {
+        fullscreenVideoRef.current.volume = nextMode === "earpiece" ? 0.35 : 1.0;
       }
     }
   };
