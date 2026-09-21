@@ -52,11 +52,14 @@ export function CallRoom({ roomId }: CallRoomProps) {
   const [swappedViews, setSwappedViews] = React.useState(false);
   const [audioMode, setAudioMode] = React.useState<"speaker" | "earpiece">("speaker");
 
-  const localVideoRef = React.useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = React.useRef<HTMLVideoElement>(null);
+  const fullscreenVideoRef = React.useRef<HTMLVideoElement>(null);
+  const pipVideoRef = React.useRef<HTMLVideoElement>(null);
   const remoteAudioRef = React.useRef<HTMLAudioElement>(null);
   const localStreamRef = React.useRef<MediaStream | null>(null);
+  const remoteStreamRef = React.useRef<MediaStream | null>(null);
   const peerConnectionRef = React.useRef<RTCPeerConnection | null>(null);
+  const [localStream, setLocalStream] = React.useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = React.useState<MediaStream | null>(null);
 
   const durationRef = React.useRef(0);
   durationRef.current = duration;
@@ -115,20 +118,28 @@ export function CallRoom({ roomId }: CallRoomProps) {
     // Handle remote track received
     pc.ontrack = (event) => {
       console.log("[WebRTC] Received remote track:", event.track.kind);
-      const stream = event.streams[0] || new MediaStream([event.track]);
-
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = stream;
-        remoteAudioRef.current.play().catch((err) => console.log("[WebRTC] Audio auto-play:", err));
+      let rStream = remoteStreamRef.current;
+      if (!rStream) {
+        rStream = new MediaStream();
+        remoteStreamRef.current = rStream;
       }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play().catch((err) => console.log("[WebRTC] Video auto-play:", err));
+      if (!rStream.getTracks().some((t) => t.id === event.track.id)) {
+        rStream.addTrack(event.track);
+      }
+
+      if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== rStream) {
+        remoteAudioRef.current.srcObject = rStream;
+        remoteAudioRef.current.play().catch((err) => console.log("[WebRTC] Audio auto-play:", err));
       }
 
       if (event.track.kind === "video") {
         setHasRemoteVideo(true);
+        event.track.onunmute = () => {
+          setHasRemoteVideo(true);
+        };
       }
+
+      setRemoteStream(new MediaStream(rStream.getTracks()));
       setIsCallConnected(true);
     };
 
@@ -151,10 +162,74 @@ export function CallRoom({ roomId }: CallRoomProps) {
       }
     };
 
+    // Acquire Local Media (with ideal constraints and resilient fallback)
+    const acquireLocalMedia = async (): Promise<MediaStream | null> => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setMediaPermissionDenied(true);
+        return null;
+      }
+
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video:
+            callType === "video"
+              ? {
+                  facingMode: { ideal: "user" },
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                }
+              : false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err1) {
+        console.warn("[WebRTC] Primary getUserMedia failed, attempting fallback:", err1);
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: callType === "video",
+            audio: true,
+          });
+        } catch (err2) {
+          console.warn("[WebRTC] Fallback getUserMedia failed:", err2);
+          setMediaPermissionDenied(true);
+        }
+      }
+
+      if (!active) {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        return null;
+      }
+
+      if (stream) {
+        localStreamRef.current = stream;
+        setLocalStream(stream);
+
+        // Attach tracks to RTCPeerConnection before any offer/answer
+        stream.getTracks().forEach((track) => {
+          try {
+            pc.addTrack(track, stream!);
+          } catch (e) {
+            console.warn("[WebRTC] addTrack error:", e);
+          }
+        });
+      }
+
+      return stream;
+    };
+
+    const localMediaPromise = acquireLocalMedia();
+
     // Helper: Caller creates and dispatches offer
     const makeOffer = async () => {
-      if (!pc || pc.signalingState !== "stable") return;
+      if (!active || !pc || pc.signalingState !== "stable") return;
       try {
+        await localMediaPromise;
+        if (!active || !pc || pc.signalingState !== "stable") return;
+
         console.log("[WebRTC] Creating and sending offer...");
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
@@ -171,56 +246,27 @@ export function CallRoom({ roomId }: CallRoomProps) {
       }
     };
 
-    // Acquire Local Media and attach tracks to PC
-    const initLocalMediaAndSignaling = async () => {
-      try {
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: callType === "video" ? { facingMode: "user" } : false,
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-
-          if (!active) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
+    // Setup Signaling Listeners immediately (not blocked by camera initialization)
+    channel
+      .on("broadcast", { event: "peer_joined" }, async (payload) => {
+        if (payload.payload?.from !== userId) {
+          console.log("[WebRTC] Remote peer entered room:", payload.payload);
+          if (role === "caller") {
+            await localMediaPromise;
+            makeOffer();
           }
-
-          localStreamRef.current = stream;
-
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = stream;
-          }
-
-          // Attach all local tracks to RTCPeerConnection before any offer/answer
-          stream.getTracks().forEach((track) => {
-            pc.addTrack(track, stream);
-          });
         }
-      } catch (err) {
-        console.warn("Media device access unavailable or denied:", err);
-        setMediaPermissionDenied(true);
-      }
+      })
+      .on("broadcast", { event: "offer" }, async (payload) => {
+        if (payload.payload?.from !== userId && payload.payload?.offer) {
+          try {
+            console.log("[WebRTC] Received offer, waiting for local tracks before answer...");
+            await localMediaPromise;
+            if (!active || !pc) return;
 
-      // Setup Signaling Listeners
-      channel
-        .on("broadcast", { event: "peer_joined" }, (payload) => {
-          if (payload.payload?.from !== userId) {
-            console.log("[WebRTC] Remote peer entered room:", payload.payload);
-            if (role === "caller") {
-              makeOffer();
-            }
-          }
-        })
-        .on("broadcast", { event: "offer" }, async (payload) => {
-          if (payload.payload?.from !== userId && payload.payload?.offer) {
-            try {
-              console.log("[WebRTC] Received offer, creating answer...");
+            if (pc.signalingState === "stable" || pc.signalingState === "have-local-offer") {
               await pc.setRemoteDescription(new RTCSessionDescription(payload.payload.offer));
-              
+
               // Apply queued ICE candidates
               while (iceCandidateQueue.length > 0) {
                 const cand = iceCandidateQueue.shift();
@@ -235,67 +281,69 @@ export function CallRoom({ roomId }: CallRoomProps) {
                 payload: { answer, from: userId },
               });
               setIsCallConnected(true);
-            } catch (e) {
-              console.warn("[WebRTC] Error handling offer:", e);
             }
+          } catch (e) {
+            console.warn("[WebRTC] Error handling offer:", e);
           }
-        })
-        .on("broadcast", { event: "answer" }, async (payload) => {
-          if (payload.payload?.from !== userId && payload.payload?.answer) {
-            try {
-              console.log("[WebRTC] Received answer, connection establishing...");
+        }
+      })
+      .on("broadcast", { event: "answer" }, async (payload) => {
+        if (payload.payload?.from !== userId && payload.payload?.answer) {
+          try {
+            console.log("[WebRTC] Received answer, connection establishing...");
+            if (pc.signalingState === "have-local-offer") {
               await pc.setRemoteDescription(new RTCSessionDescription(payload.payload.answer));
-              
+
               // Apply queued ICE candidates
               while (iceCandidateQueue.length > 0) {
                 const cand = iceCandidateQueue.shift();
                 if (cand) await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
               }
               setIsCallConnected(true);
-            } catch (e) {
-              console.warn("[WebRTC] Error handling answer:", e);
             }
+          } catch (e) {
+            console.warn("[WebRTC] Error handling answer:", e);
           }
-        })
-        .on("broadcast", { event: "ice-candidate" }, async (payload) => {
-          if (payload.payload?.from !== userId && payload.payload?.candidate) {
-            try {
-              if (pc.remoteDescription) {
-                await pc.addIceCandidate(new RTCIceCandidate(payload.payload.candidate));
-              } else {
-                iceCandidateQueue.push(payload.payload.candidate);
-              }
-            } catch (err) {
-              console.warn("[WebRTC] Candidate error:", err);
+        }
+      })
+      .on("broadcast", { event: "ice-candidate" }, async (payload) => {
+        if (payload.payload?.from !== userId && payload.payload?.candidate) {
+          try {
+            if (pc.remoteDescription && pc.remoteDescription.type) {
+              await pc.addIceCandidate(new RTCIceCandidate(payload.payload.candidate));
+            } else {
+              iceCandidateQueue.push(payload.payload.candidate);
             }
+          } catch (err) {
+            console.warn("[WebRTC] Candidate error:", err);
           }
-        })
-        .on("broadcast", { event: "end_call" }, () => {
-          handleLeaveCall();
-        })
-        .subscribe((status) => {
-          if (status === "SUBSCRIBED") {
-            // Announce presence in room
-            channel.send({
-              type: "broadcast",
-              event: "peer_joined",
-              payload: { from: userId, role },
-            });
+        }
+      })
+      .on("broadcast", { event: "end_call" }, () => {
+        handleLeaveCall();
+      })
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          // Announce presence in room
+          channel.send({
+            type: "broadcast",
+            event: "peer_joined",
+            payload: { from: userId, role },
+          });
 
-            if (role === "caller") {
-              setTimeout(() => {
-                makeOffer();
-              }, 500);
-            }
+          if (role === "caller") {
+            setTimeout(async () => {
+              await localMediaPromise;
+              makeOffer();
+            }, 300);
           }
-        });
-    };
-
-    initLocalMediaAndSignaling();
+        }
+      });
 
     // Re-ping offer periodically if caller has not connected yet
-    const retryOfferInterval = setInterval(() => {
-      if (role === "caller" && pc.connectionState !== "connected" && !pc.remoteDescription) {
+    const retryOfferInterval = setInterval(async () => {
+      if (role === "caller" && pc.connectionState !== "connected" && !pc.remoteDescription && pc.signalingState === "stable") {
+        await localMediaPromise;
         makeOffer();
       }
     }, 2500);
@@ -318,6 +366,35 @@ export function CallRoom({ roomId }: CallRoomProps) {
       }
     };
   }, [roomId, userId, role, supabase, callType]);
+
+  // Dedicated Video Stream Synchronization Effect for Fullscreen and Corner PiP
+  React.useEffect(() => {
+    const fsVideo = fullscreenVideoRef.current;
+    const pipVideo = pipVideoRef.current;
+
+    // Swapped: Fullscreen shows LOCAL stream, PiP shows REMOTE stream
+    // Normal: Fullscreen shows REMOTE stream, PiP shows LOCAL stream
+    const fsStream = swappedViews ? localStream : remoteStream;
+    const pipStream = swappedViews ? remoteStream : localStream;
+
+    if (fsVideo) {
+      if (fsVideo.srcObject !== fsStream) {
+        fsVideo.srcObject = fsStream || null;
+      }
+      if (fsStream) {
+        fsVideo.play().catch(() => {});
+      }
+    }
+
+    if (pipVideo) {
+      if (pipVideo.srcObject !== pipStream) {
+        pipVideo.srcObject = pipStream || null;
+      }
+      if (pipStream) {
+        pipVideo.play().catch(() => {});
+      }
+    }
+  }, [swappedViews, localStream, remoteStream, hasRemoteVideo, isCallConnected]);
 
   // Toggle Mic Audio Track
   React.useEffect(() => {
@@ -351,19 +428,27 @@ export function CallRoom({ roomId }: CallRoomProps) {
         if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
           const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
           const screenTrack = screenStream.getVideoTracks()[0];
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = screenStream;
-          }
+
+          setLocalStream(screenStream);
+
           if (peerConnectionRef.current) {
             const sender = peerConnectionRef.current
               .getSenders()
               .find((s) => s.track?.kind === "video");
             if (sender) sender.replaceTrack(screenTrack);
           }
+
           screenTrack.onended = () => {
             setIsScreenSharing(false);
-            if (localStreamRef.current && localVideoRef.current) {
-              localVideoRef.current.srcObject = localStreamRef.current;
+            if (localStreamRef.current) {
+              setLocalStream(localStreamRef.current);
+              if (peerConnectionRef.current) {
+                const camTrack = localStreamRef.current.getVideoTracks()[0];
+                const sender = peerConnectionRef.current
+                  .getSenders()
+                  .find((s) => s.track?.kind === "video");
+                if (sender && camTrack) sender.replaceTrack(camTrack);
+              }
             }
           };
           setIsScreenSharing(true);
@@ -373,8 +458,15 @@ export function CallRoom({ roomId }: CallRoomProps) {
       }
     } else {
       setIsScreenSharing(false);
-      if (localStreamRef.current && localVideoRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+      if (localStreamRef.current) {
+        setLocalStream(localStreamRef.current);
+        if (peerConnectionRef.current) {
+          const camTrack = localStreamRef.current.getVideoTracks()[0];
+          const sender = peerConnectionRef.current
+            .getSenders()
+            .find((s) => s.track?.kind === "video");
+          if (sender && camTrack) sender.replaceTrack(camTrack);
+        }
       }
     }
   };
@@ -506,21 +598,23 @@ export function CallRoom({ roomId }: CallRoomProps) {
       {/* 1. WHATSAPP VIDEO CALL FULLSCREEN VIEW (Remote Participant)               */}
       {/* ========================================================================= */}
       <div className="absolute inset-0 w-full h-full overflow-hidden bg-gradient-to-b from-[#0e1422] to-[#070a12] flex items-center justify-center">
-        {/* Remote Live Video Element */}
+        {/* Fullscreen Video Element */}
         <video
-          ref={swappedViews ? localVideoRef : remoteVideoRef}
+          ref={fullscreenVideoRef}
           autoPlay
           playsInline
           muted={swappedViews}
           className={cn(
             "w-full h-full object-cover transition-opacity duration-300",
             swappedViews && "-scale-x-100",
-            (!hasRemoteVideo && !swappedViews) ? "opacity-0 pointer-events-none" : "opacity-100"
+            (!hasRemoteVideo && !swappedViews) || callType === "audio" || (videoOff && swappedViews)
+              ? "opacity-0 pointer-events-none"
+              : "opacity-100"
           )}
         />
 
         {/* Remote Avatar Display (if camera off, video off, or voice call) */}
-        {(!hasRemoteVideo || callType === "audio" || (videoOff && swappedViews)) && (
+        {((!hasRemoteVideo && !swappedViews) || callType === "audio" || (videoOff && swappedViews)) && (
           <div className="flex flex-col items-center justify-center gap-4 text-center p-6 animate-fadeIn select-none">
             <div className="relative flex items-center justify-center">
               <span className="absolute w-36 h-36 rounded-full bg-emerald-500/20 animate-ping" />
@@ -582,12 +676,12 @@ export function CallRoom({ roomId }: CallRoomProps) {
       {/* ========================================================================= */}
       {callType === "video" && (
         <div
-          onClick={() => setSwappedViews(!swappedViews)}
+          onClick={() => setSwappedViews((prev) => !prev)}
           title="Click to swap fullscreen & corner view (WhatsApp PiP)"
           className="absolute bottom-24 right-4 sm:bottom-28 sm:right-6 w-28 h-40 sm:w-36 sm:h-52 rounded-2xl shadow-2xl border-2 border-white/25 overflow-hidden z-30 bg-[#161c2b] cursor-pointer hover:scale-105 transition-all group select-none"
         >
           <video
-            ref={swappedViews ? remoteVideoRef : localVideoRef}
+            ref={pipVideoRef}
             autoPlay
             playsInline
             muted={!swappedViews}
@@ -604,6 +698,14 @@ export function CallRoom({ roomId }: CallRoomProps) {
             <div className="w-full h-full flex flex-col items-center justify-center bg-[#161c2b] p-2 text-center">
               <Avatar src={user?.avatar_url} name={user?.full_name || "You"} size="md" className="mb-1" />
               <span className="text-[10px] text-zinc-400">Camera Off</span>
+            </div>
+          )}
+
+          {/* If remote video not ready and views swapped */}
+          {!hasRemoteVideo && swappedViews && (
+            <div className="w-full h-full flex flex-col items-center justify-center bg-[#161c2b] p-2 text-center">
+              <Avatar src={avatarParam || undefined} name={roomName} size="md" className="mb-1" />
+              <span className="text-[10px] text-zinc-400">Connecting...</span>
             </div>
           )}
 

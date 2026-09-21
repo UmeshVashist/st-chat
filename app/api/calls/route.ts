@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     const supabase = createAdminClient();
     const { data: call, error } = await supabase
       .from("calls")
-      .upsert({
+      .insert({
         room_id: roomId || `room-${Date.now()}`,
         caller_id: callerId,
         call_type: callType || "video",
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
         ended_at: new Date().toISOString(),
       })
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
